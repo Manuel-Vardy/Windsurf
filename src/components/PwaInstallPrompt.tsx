@@ -15,6 +15,11 @@ export default function PwaInstallPrompt() {
     return /iphone|ipad|ipod/.test(ua);
   }, []);
 
+  const isChromium = useMemo(() => {
+    const ua = window.navigator.userAgent;
+    return /Chrome|Chromium|Edg\//.test(ua);
+  }, []);
+
   const isStandalone = useMemo(() => {
     const nav = window.navigator as Navigator & { standalone?: boolean };
     return Boolean(nav.standalone) || window.matchMedia("(display-mode: standalone)").matches;
@@ -47,30 +52,33 @@ export default function PwaInstallPrompt() {
 
   if (isInstalled) return null;
 
-  if (deferredPrompt) {
-    return (
-      <Button
-        variant="default"
-        size="sm"
-        onClick={async () => {
+  return (
+    <Button
+      variant="default"
+      size="sm"
+      onClick={async () => {
+        if (deferredPrompt) {
           const prompt = deferredPrompt;
           setDeferredPrompt(null);
           await prompt.prompt();
           await prompt.userChoice;
-        }}
-      >
-        Install App
-      </Button>
-    );
-  }
+          return;
+        }
 
-  if (isIos) {
-    return (
-      <div className="text-xs text-muted-foreground">
-        Install: Share button then "Add to Home Screen"
-      </div>
-    );
-  }
+        if (isIos) {
+          window.alert('To install: tap Share, then "Add to Home Screen".');
+          return;
+        }
 
-  return null;
+        if (isChromium) {
+          window.alert('To install: open the browser menu (⋮) and choose "Install app" / "Add to Home screen".');
+          return;
+        }
+
+        window.alert('To install: use your browser menu and choose "Install" / "Add to Home screen" (if supported).');
+      }}
+    >
+      Install App
+    </Button>
+  );
 }
