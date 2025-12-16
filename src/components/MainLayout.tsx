@@ -6,6 +6,7 @@ import { useSchool } from '@/contexts/SchoolContext';
 import { Sheet, SheetContent } from '@/components/ui/sheet';
 import { Button } from '@/components/ui/button';
 import { Menu } from 'lucide-react';
+import PwaInstallPrompt from './PwaInstallPrompt';
 
 const MainLayout: React.FC = () => {
   const [currentView, setCurrentView] = useState<'dashboard' | 'class'>('dashboard');
@@ -42,6 +43,9 @@ const MainLayout: React.FC = () => {
             <Menu className="h-5 w-5" />
           </Button>
           <div className="font-semibold">School Canteen</div>
+          <div className="ml-auto">
+            <PwaInstallPrompt />
+          </div>
         </div>
 
         {currentView === 'dashboard' ? (
