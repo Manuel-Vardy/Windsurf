@@ -1,5 +1,13 @@
-import React, { createContext, useContext, useState, ReactNode } from 'react';
+import React, { createContext, useContext, useEffect, useRef, useState, ReactNode } from 'react';
 import { classesData, ClassInfo, Student, generateInitialWeeks, WeekPayment, CANTEEN_FEE } from '@/data/mockData';
+import {
+  ensureSeededFromMockData,
+  subscribeClasses,
+  subscribeStudents,
+  subscribeWeeksForClass,
+  upsertStudent,
+  upsertWeekWithStudentKeys,
+} from '@/lib/schoolRepo';
 
 interface SchoolContextType {
   classes: ClassInfo[];
@@ -27,6 +35,19 @@ const SchoolContext = createContext<SchoolContextType | undefined>(undefined);
 
 export const SchoolProvider: React.FC<{ children: ReactNode }> = ({ children }) => {
   const [classes, setClasses] = useState<ClassInfo[]>(() => classesData);
+  const [classDocs, setClassDocs] = useState<Array<{ id: number; name: string; tutor: string }>>([]);
+  const [studentDocs, setStudentDocs] = useState<
+    Array<{
+      id: string;
+      name: string;
+      classId: number;
+      gender: 'Male' | 'Female';
+      age: number;
+      parentPhone: string;
+      photoUrl: string;
+      startWeek?: number;
+    }>
+  >([]);
   const [selectedClass, setSelectedClass] = useState(1);
   const [compactView, setCompactView] = useState(false);
   const [studentStartWeek, setStudentStartWeek] = useState<Record<number, Record<string, number>>>(() => {
@@ -46,6 +67,115 @@ export const SchoolProvider: React.FC<{ children: ReactNode }> = ({ children }) 
     });
     return initial;
   });
+
+  const weeksUnsubsRef = useRef<Record<number, () => void>>({});
+
+  useEffect(() => {
+    let didCancel = false;
+    let unsubClasses: undefined | (() => void);
+    let unsubStudents: undefined | (() => void);
+
+    (async () => {
+      try {
+        await ensureSeededFromMockData();
+        if (didCancel) return;
+
+        unsubClasses = subscribeClasses((next) => {
+          setClassDocs(next);
+        });
+
+        unsubStudents = subscribeStudents((next) => {
+          setStudentDocs(next);
+        });
+      } catch (e) {
+        console.error(e);
+      }
+    })();
+
+    return () => {
+      didCancel = true;
+      if (unsubClasses) unsubClasses();
+      if (unsubStudents) unsubStudents();
+      Object.values(weeksUnsubsRef.current).forEach((unsub) => unsub());
+      weeksUnsubsRef.current = {};
+    };
+  }, []);
+
+  useEffect(() => {
+    if (!classDocs.length) return;
+
+    // Manage week listeners per class so any payment/week change syncs automatically.
+    const current = weeksUnsubsRef.current;
+
+    const classIds = new Set(classDocs.map((c) => c.id));
+
+    // Remove listeners for classes that no longer exist.
+    for (const existingId of Object.keys(current).map(Number)) {
+      if (!classIds.has(existingId)) {
+        current[existingId]?.();
+        delete current[existingId];
+      }
+    }
+
+    // Add listeners for new classes.
+    for (const c of classDocs) {
+      if (current[c.id]) continue;
+      current[c.id] = subscribeWeeksForClass(c.id, (nextWeeks) => {
+        setWeeks((prev) => ({
+          ...prev,
+          [c.id]: nextWeeks.length ? nextWeeks : generateInitialWeeks(),
+        }));
+      });
+    }
+  }, [classDocs]);
+
+  useEffect(() => {
+    if (!classDocs.length) return;
+
+    const classesFromDb: ClassInfo[] = classDocs
+      .sort((a, b) => a.id - b.id)
+      .map((c) => ({
+        id: c.id,
+        name: c.name,
+        tutor: c.tutor,
+        students: [],
+      }));
+
+    const studentsByClass: Record<number, Student[]> = {};
+    const startWeekByClass: Record<number, Record<string, number>> = {};
+
+    for (const s of studentDocs) {
+      const classId = s.classId;
+      if (!studentsByClass[classId]) studentsByClass[classId] = [];
+      if (!startWeekByClass[classId]) startWeekByClass[classId] = {};
+
+      studentsByClass[classId].push({
+        id: s.id,
+        name: s.name,
+        class: classId,
+        gender: s.gender,
+        age: s.age,
+        parentPhone: s.parentPhone,
+        photoUrl: s.photoUrl,
+      });
+      startWeekByClass[classId][s.id] = s.startWeek ?? 1;
+    }
+
+    const mergedClasses: ClassInfo[] = classesFromDb.map((c) => ({
+      ...c,
+      students: (studentsByClass[c.id] || []).sort((a, b) => a.name.localeCompare(b.name)),
+    }));
+
+    setClasses(mergedClasses);
+    setStudentStartWeek((prev) => ({
+      ...prev,
+      ...startWeekByClass,
+    }));
+
+    if (!mergedClasses.some((c) => c.id === selectedClass)) {
+      setSelectedClass(mergedClasses[0]?.id ?? 1);
+    }
+  }, [classDocs, studentDocs, selectedClass]);
 
   const addStudent = (
     classId: number,
@@ -73,6 +203,16 @@ export const SchoolProvider: React.FC<{ children: ReactNode }> = ({ children }) 
         },
       };
     });
+
+    void upsertStudent(newStudent.id, {
+      name: newStudent.name,
+      classId,
+      gender: newStudent.gender,
+      age: newStudent.age,
+      parentPhone: newStudent.parentPhone,
+      photoUrl: newStudent.photoUrl,
+      startWeek: startWeekNumber,
+    });
   };
 
   const getClassStudentsForWeek = (classId: number, weekNumber: number): Student[] => {
@@ -87,13 +227,24 @@ export const SchoolProvider: React.FC<{ children: ReactNode }> = ({ children }) 
     setWeeks(prev => {
       const classWeeks = prev[classId] || [];
       const newWeekNumber = classWeeks.length + 1;
-      return {
+      const next = {
         ...prev,
         [classId]: [
           ...classWeeks,
           { weekNumber: newWeekNumber, weekName: `Week ${newWeekNumber}`, payments: {} }
         ]
       };
+
+      const classInfo = classes.find((c) => c.id === classId);
+      const studentKeys = Object.fromEntries((classInfo?.students || []).map((s) => [s.id, s.name] as const));
+
+      void upsertWeekWithStudentKeys(classId, {
+        weekNumber: newWeekNumber,
+        weekName: `Week ${newWeekNumber}`,
+        payments: {},
+      }, studentKeys);
+
+      return next;
     });
   };
 
@@ -110,6 +261,15 @@ export const SchoolProvider: React.FC<{ children: ReactNode }> = ({ children }) 
       
       week.payments = { ...week.payments, [studentId]: studentPayments };
       classWeeks[weekIndex] = week;
+
+      const classInfo = classes.find((c) => c.id === classId);
+      const studentKeys = Object.fromEntries((classInfo?.students || []).map((s) => [s.id, s.name] as const));
+
+      void upsertWeekWithStudentKeys(classId, {
+        weekNumber: week.weekNumber,
+        weekName: week.weekName,
+        payments: week.payments,
+      }, studentKeys);
 
       return { ...prev, [classId]: classWeeks };
     });
